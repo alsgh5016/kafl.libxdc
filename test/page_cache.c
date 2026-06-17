@@ -45,6 +45,22 @@ SOFTWARE.
 
 #define UNMAPPED_PAGE 0xFFFFFFFFFFFFFFFFULL
 
+/* Offline-analysis patch: WtE dumps are incomplete (some executed pages, e.g.
+ * un-dumped DLL .text, were never captured). Stock libxdc returns success=false
+ * on a miss, which fatally truncates the whole trace. Instead, serve a real page
+ * filled with 0xC3 (ret): a change-of-flow byte that ends the block and consumes
+ * the next TIP (no runaway disasm), so decoding skips the gap and resyncs at the
+ * next TIP/PSB rather than stopping. Bounded junk near gaps is filtered downstream. */
+static uint8_t g_miss_page[PAGE_SIZE];
+static int g_miss_page_init = 0;
+static uint64_t g_miss_count = 0;
+
+static void* miss_page(void){
+	if(!g_miss_page_init){ memset(g_miss_page, 0xC3, PAGE_SIZE); g_miss_page_init = 1; }
+	g_miss_count++;
+	return (void*)g_miss_page;
+}
+
 
 bool reload_addresses(page_cache_t* self){
 	khiter_t k;
@@ -177,11 +193,14 @@ void* page_cache_fetch(void* self_ptr, uint64_t page, bool* success){
 	//QEMU_PT_PRINTF(PAGE_CACHE_PREFIX, "page_cache_fetch %lx", page);
 	
 	khiter_t k;
-	k = kh_get(PC_CACHE, self->lookup, page); 
+	k = kh_get(PC_CACHE, self->lookup, page);
 	if(k == kh_end(self->lookup)){
 		if(test_mode || update_page_cache(self, page, &k) == false){
-			*success = false;
-			return 0;
+			/* offline patch: serve ret-filled page instead of fatal fault */
+			self->last_page = page;
+			self->last_addr = (uint64_t)miss_page();
+			*success = true;
+			return (void*)self->last_addr;
 		}
 	}
 
