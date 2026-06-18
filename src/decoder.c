@@ -799,22 +799,49 @@ __attribute__((hot)) decoder_result_t decode_buffer(decoder_t* self, uint8_t* ma
 	handle_pt_tip:
 		tip_handler(self, &p);
 		if(unlikely(self->page_fault_found)){
-			pt_decoder_flush(self);
-			return decoder_page_fault;
+			/* offline robustness: a single missing/odd page must NOT abort the
+			 * whole decode — that drops the OEP + payload that execute later in
+			 * the trace (sentinel/0xffff faults mid-trace).  Treat it exactly
+			 * like a PT overflow and reuse the existing ovp_state machinery to
+			 * resync at the next PGE/FUP. */
+			self->page_fault_found = false;
+			self->ovp_state = true;
+			self->last_tip = 0;
+			decoder_statemachine_reset(self->decoder_state);
+			pt_overflowed = true;
+			DISPATCH_L1();
 		}
 		DISPATCH_L1();
 	handle_pt_tip_pge:
 		tip_pge_handler(self, &p);
 		if(unlikely(self->page_fault_found)){
-			pt_decoder_flush(self);
-			return decoder_page_fault;
+			/* offline robustness: a single missing/odd page must NOT abort the
+			 * whole decode — that drops the OEP + payload that execute later in
+			 * the trace (sentinel/0xffff faults mid-trace).  Treat it exactly
+			 * like a PT overflow and reuse the existing ovp_state machinery to
+			 * resync at the next PGE/FUP. */
+			self->page_fault_found = false;
+			self->ovp_state = true;
+			self->last_tip = 0;
+			decoder_statemachine_reset(self->decoder_state);
+			pt_overflowed = true;
+			DISPATCH_L1();
 		}
 		DISPATCH_L1();
 	handle_pt_tip_pgd:
 		tip_pgd_handler(self, &p);
 		if(unlikely(self->page_fault_found)){
-			pt_decoder_flush(self);
-			return decoder_page_fault;
+			/* offline robustness: a single missing/odd page must NOT abort the
+			 * whole decode — that drops the OEP + payload that execute later in
+			 * the trace (sentinel/0xffff faults mid-trace).  Treat it exactly
+			 * like a PT overflow and reuse the existing ovp_state machinery to
+			 * resync at the next PGE/FUP. */
+			self->page_fault_found = false;
+			self->ovp_state = true;
+			self->last_tip = 0;
+			decoder_statemachine_reset(self->decoder_state);
+			pt_overflowed = true;
+			DISPATCH_L1();
 		}
 		DISPATCH_L1();
 	handle_pt_tip_fup:
