@@ -367,16 +367,6 @@ static inline void disasm(decoder_t* self){
 
 
 static void tip_handler(decoder_t* self, uint8_t** p){
-	if(unlikely(self->ovp_state)){
-		/* Between an overflow / page-fault and the FUP or TIP.PGE that
-		 * re-anchors the IP, the decoder is desynced and last_tip has been
-		 * reset to 0.  A plain TIP here reconstructs a *compressed* IP against
-		 * 0 -> a garbage low address (e.g. 0x1782, 0x17b8 ...) that pollutes
-		 * the CFG.  Consume the packet to stay byte-aligned, but emit nothing;
-		 * resync is handled by the FUP/PGE handlers which clear ovp_state. */
-		get_ip_val(self, p);
-		return;
-	}
 	if(unlikely(self->fup_bind_pending)){
 		self->fup_bind_pending = false;
 		decoder_handle_fup(self->decoder_state, self->last_fup_src, self->decoder_state_result);
