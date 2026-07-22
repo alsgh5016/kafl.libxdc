@@ -16,39 +16,52 @@
 #include "helper.h"
 #include <errno.h>
 
-void trace_log(void* fd, disassembler_mode_t mode, uint64_t src, uint64_t dst)
+/*
+ * Edge callback. The decoder invokes this once per taken branch — for a dense
+ * VM-interpreter trace that is tens of millions of times. The output stream is
+ * therefore the whole cost: the previous implementation used dprintf() on a raw
+ * fd, i.e. one UNBUFFERED write() syscall per edge, which on a 43M-edge trace is
+ * ~53s single-process and >600s under parallel load (kernel/disk syscall
+ * contention). Writing through a FILE* with a large fully-buffered stream
+ * (see setvbuf in trace_file) collapses those millions of syscalls into a few
+ * hundred and produces byte-identical output. */
+void trace_log(void* ctx, disassembler_mode_t mode, uint64_t src, uint64_t dst)
 {
 	assert(mode == mode_16 || mode == mode_32 || mode == mode_64);
-	if (fd) {
-		dprintf(*(int*)fd, "%lx,%lx\n", src,dst);
-	} else {
-		printf("%lx,%lx\n", src,dst);
-	}
+	fprintf((FILE*)ctx, "%lx,%lx\n", src, dst);
 }
+
+/* 4 MB fully-buffered output buffer: turns ~N write() syscalls per edge into
+ * one per 4 MB of CSV. Static so it outlives trace_file's stack frame. */
+static char g_out_buf[1 << 22];
 
 int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const char* page_cache_file, const char* outfile)
 {
 	int ret_val = 0;
 	decoder_result_t ret;
-	int fd = 0;
+	FILE* out;
 
-	if (0 != strcmp(outfile, "-")) {
-		fd = open(outfile, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-
-		if (!fd) {
+	if (0 == strcmp(outfile, "-")) {
+		out = stdout;
+	} else {
+		out = fopen(outfile, "w");
+		if (!out) {
 			fprintf(stderr, "Error: %s\n", strerror(errno));
 			return 1;
 		}
 	}
+	setvbuf(out, g_out_buf, _IOFBF, sizeof(g_out_buf));
 
 	page_cache_t* page_cache =  page_cache_new(page_cache_file);
 	void* bitmap = malloc(0x10000);
 	libxdc_t* decoder = libxdc_init(filter, &page_cache_fetch, page_cache, bitmap, 0x10000);
 	libxdc_enable_tracing(decoder);
-	libxdc_register_edge_callback(decoder, &trace_log, &fd);
+	libxdc_register_edge_callback(decoder, &trace_log, out);
 	ret = libxdc_decode(decoder, trace, trace_size);
 	libxdc_disable_tracing(decoder);
-	close(fd);
+	fflush(out);
+	if (out != stdout)
+		fclose(out);
 
 	print_result_code(ret);
 	if (ret != decoder_success && ret != decoder_success_pt_overflow) {
