@@ -353,11 +353,65 @@ static inline uint64_t get_val(uint8_t **pp, uint8_t len){
 
 
 
-static inline void disasm(decoder_t* self){
+/*
+ * Walk-logging variant of disasm(): the same trace_disassembler call, bracketed
+ * by the walk callbacks. Kept out of line so the default path (no walk
+ * callback registered) only pays one predictable NULL check per walk.
+ */
+static __attribute__((noinline)) void disasm_walk_logged(decoder_t* self, const uint8_t* pkt, bool limited){
+	uint64_t failed_page = 0;
+	should_disasm_t* res = self->decoder_state_result;
+	disassembler_t* dis = self->disassembler_state;
+	libxdc_walk_t walk;
+
+	walk.anchor_offset = (uint64_t)(pkt - self->walk_map_base);
+	walk.start = res->start;
+	walk.limit = res->end;
+	walk.tnt_before = (uint32_t)count_tnt(self->tnt_cache_state);
+	walk.flags = limited ? LIBXDC_WALK_LIMITED : 0;
+	dis->walk_stop_addr = 0;
+	if(self->walk_begin_callback){
+		self->walk_begin_callback(self->walk_callback_opaque);
+	}
+
+	disas_result_t r = trace_disassembler(dis, res->start, res->end, self->tnt_cache_state, &failed_page, self->mode);
+
+	walk.tnt_after = (uint32_t)count_tnt(self->tnt_cache_state);
+	walk.stop_addr = dis->walk_stop_addr;
+	switch(r){
+		case disas_page_fault:
+			self->page_fault_found = true;
+			self->page_fault_addr = failed_page;
+			walk.stop_addr = failed_page;
+			walk.flags |= LIBXDC_WALK_PAGE_FAULT;
+			break;
+		case disas_tip_pending:
+			walk.flags |= LIBXDC_WALK_INDIRECT;
+			break;
+		case disas_out_of_bounds:
+			walk.flags |= LIBXDC_WALK_OOB_OR_LOOP;
+			break;
+		case disas_infinite_loop:
+			walk.flags |= LIBXDC_WALK_OOB_OR_LOOP | LIBXDC_WALK_LOOP;
+			break;
+		default:
+			break;
+	}
+	self->walk_end_callback(self->walk_callback_opaque, &walk);
+}
+
+/* pkt: start of the packet that bounds this walk (TIP/PGE/PGD, or the FUP
+ * packet of a FUP-bound walk); limited: the walk is bounded by a FUP or PGD.
+ * Both are used only by the walk log. */
+static inline void disasm(decoder_t* self, const uint8_t* pkt, bool limited){
 	static uint64_t failed_page = 0;
 	should_disasm_t* res = self->decoder_state_result;
 	if(res->valid && (!is_empty_tnt_cache(self->tnt_cache_state))){
 		LOGGER("disasm(%lx,%lx)\tTNT: %d\n", res->start, res->end, count_tnt(self->tnt_cache_state));
+		if(unlikely(self->walk_end_callback != NULL)){
+			disasm_walk_logged(self, pkt, limited);
+			return;
+		}
 			if(unlikely(trace_disassembler(self->disassembler_state, res->start, res->end, self->tnt_cache_state, &failed_page, self->mode) == disas_page_fault)){
 				self->page_fault_found = true;
 				self->page_fault_addr = failed_page;
@@ -367,11 +421,12 @@ static inline void disasm(decoder_t* self){
 
 
 static void tip_handler(decoder_t* self, uint8_t** p){
+	const uint8_t* pkt = *p;
 	if(unlikely(self->fup_bind_pending)){
 		self->fup_bind_pending = false;
 		decoder_handle_fup(self->decoder_state, self->last_fup_src, self->decoder_state_result);
     self->last_fup_src = 0;
-		disasm(self);
+		disasm(self, self->last_fup_pkt, true);
 		if(unlikely(self->page_fault_found)){
 			return;
 		}
@@ -381,7 +436,7 @@ static void tip_handler(decoder_t* self, uint8_t** p){
 
 	LOGGER("TIP    \t%lx (TNT: %d)\n", self->last_tip, count_tnt(self->tnt_cache_state));
 	decoder_handle_tip(self->decoder_state, self->last_tip, self->decoder_state_result);
-	disasm(self);
+	disasm(self, pkt, false);
 #ifdef DECODER_LOG
 	self->log.tip++;
 #endif
@@ -394,7 +449,7 @@ static void tip_pge_handler(decoder_t* self, uint8_t** p){
 		self->fup_bind_pending = false;
 		decoder_handle_fup(self->decoder_state, self->last_fup_src, self->decoder_state_result);
     	self->last_fup_src = 0;
-		disasm(self);
+		disasm(self, self->last_fup_pkt, true);
 		if(unlikely(self->page_fault_found)){
 			return;
 		}
@@ -415,11 +470,12 @@ static void tip_pge_handler(decoder_t* self, uint8_t** p){
 }
 
 static void tip_pgd_handler(decoder_t* self, uint8_t** p){
+	const uint8_t* pkt = *p;
 	if(unlikely(self->fup_bind_pending)){
 		self->fup_bind_pending = false;
 		decoder_handle_fup(self->decoder_state, self->last_fup_src, self->decoder_state_result);
     	self->last_fup_src = 0;
-		disasm(self);
+		disasm(self, self->last_fup_pkt, true);
 		if(unlikely(self->page_fault_found)){
 			return;
 		}
@@ -428,7 +484,7 @@ static void tip_pgd_handler(decoder_t* self, uint8_t** p){
 	get_ip_val(self, p);
 	LOGGER("PGD    \t%lx (TNT: %d)\n", self->last_tip, count_tnt(self->tnt_cache_state));
 	decoder_handle_pgd(self->decoder_state, self->last_tip, self->decoder_state_result);
-	disasm(self);
+	disasm(self, pkt, true);
 
 	if(unlikely(self->disassembler_state->trace_mode)){
 		if(self->disassembler_state->has_pending_indirect_branch){
@@ -459,6 +515,7 @@ static void tip_fup_handler(decoder_t* self, uint8_t** p){
 		return;
 	}
 		
+	self->last_fup_pkt = *p;
 	self->last_fup_src = get_ip_val(self, p);
 	LOGGER("FUP    \t%lx (TNT: %d)\n", self->last_fup_src, count_tnt(self->tnt_cache_state));
 
@@ -749,6 +806,7 @@ __attribute__((hot)) decoder_result_t decode_buffer(decoder_t* self, uint8_t* ma
 
 	bool pt_overflowed = false;
 	self->page_fault_found = false;
+	self->walk_map_base = map;
 
 	uint8_t *end = map + len;
 	uint8_t *p = map;

@@ -38,6 +38,27 @@ SOFTWARE.
 
 #define INIT_TRACE_IP 0xFFFFFFFFFFFFFFFFULL
 
+/*
+ * Opt-in walk log (see libxdc_register_walk_callbacks). A walk is one
+ * trace_disassembler run from an IP anchor to the next one; it only happens
+ * when TNT bits are pending. Mirrored in the public libxdc.h.
+ */
+#define LIBXDC_WALK_PAGE_FAULT   0x01 /* hit a missing page; the decoder resyncs at the next PGE/FUP */
+#define LIBXDC_WALK_INDIRECT     0x02 /* stopped at an indirect / far transfer (waits for a TIP) */
+#define LIBXDC_WALK_LIMITED      0x04 /* bounded by a FUP or TIP.PGD IP */
+#define LIBXDC_WALK_OOB_OR_LOOP  0x08 /* stopped at the FUP/PGD limit block, or at the loop limit */
+#define LIBXDC_WALK_LOOP         0x10 /* loop limit (MAX_LOOP_COUNT) reached; implies OOB_OR_LOOP */
+
+typedef struct libxdc_walk_s {
+	uint64_t anchor_offset; /* byte offset in the decoded buffer of the TIP/PGE/PGD packet that ran the walk, or of the FUP packet for a FUP-bound walk */
+	uint64_t start;         /* walk entry IP */
+	uint64_t limit;         /* FUP/PGD IP passed to the disassembler as limit (0 = none) */
+	uint64_t stop_addr;     /* branch instruction the walk stopped at; faulting address on a page fault */
+	uint32_t tnt_before;    /* TNT bits pending when the walk started */
+	uint32_t tnt_after;     /* TNT bits left when it stopped */
+	uint8_t flags;          /* LIBXDC_WALK_* */
+} libxdc_walk_t;
+
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
@@ -142,6 +163,9 @@ typedef struct disassembler_s{
 
 	disassembler_cfg_t cfg;
 
+	/* walk log: branch address where the last trace-mode walk stopped */
+	uint64_t walk_stop_addr;
+
 } disassembler_t;
 
 
@@ -184,6 +208,13 @@ typedef struct decoder_s{
 
 	void (*ip_callback)(void*, disassembler_mode_t, uint64_t);
 	void* ip_callback_opaque;
+
+	/* walk log (NULL walk_end_callback = disabled, the default) */
+	void (*walk_begin_callback)(void*);
+	void (*walk_end_callback)(void*, const libxdc_walk_t*);
+	void* walk_callback_opaque;
+	const uint8_t* walk_map_base;
+	const uint8_t* last_fup_pkt;
 
 #ifdef DECODER_LOG
 	struct decoder_log_s{

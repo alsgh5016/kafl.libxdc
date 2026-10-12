@@ -35,7 +35,75 @@ void trace_log(void* ctx, disassembler_mode_t mode, uint64_t src, uint64_t dst)
  * one per 4 MB of CSV. Static so it outlives trace_file's stack frame. */
 static char g_out_buf[1 << 22];
 
-int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const char* page_cache_file, const char* outfile)
+/*
+ * Walk log (`-w <path>`): header "XDC-WALK" + u32 version, then one 48-byte
+ * little-endian record per libxdc walk, Python struct `<QQQIIIQB3x>`:
+ * (anchor packet offset, first edge index, end edge index, tnt_before,
+ *  tnt_used, tnt_after, stop address, flags). Edge indices count CSV rows.
+ * Only when -w is given is the counting edge callback installed, so the
+ * default path is exactly the old one.
+ */
+#define WALK_LOG_VERSION 1
+
+typedef struct __attribute__((packed)) walk_record_s {
+	uint64_t anchor_offset;
+	uint64_t edge_start;
+	uint64_t edge_end;
+	uint32_t tnt_before;
+	uint32_t tnt_used;
+	uint32_t tnt_after;
+	uint64_t stop_addr;
+	uint8_t flags;
+	uint8_t pad[3];
+} walk_record_t;
+_Static_assert(sizeof(walk_record_t) == 48, "walk record is <QQQIIIQB3x>");
+
+static char g_walk_buf[1 << 20];
+static FILE* g_walk_out = NULL;
+static uint64_t g_edge_count = 0;
+static uint64_t g_walk_edge_start = 0;
+
+void trace_log_counted(void* ctx, disassembler_mode_t mode, uint64_t src, uint64_t dst)
+{
+	trace_log(ctx, mode, src, dst);
+	g_edge_count++;
+}
+
+static void walk_begin(void* opaque)
+{
+	(void)opaque;
+	g_walk_edge_start = g_edge_count;
+}
+
+static void walk_end(void* opaque, const libxdc_walk_t* walk)
+{
+	walk_record_t rec = {
+		.anchor_offset = walk->anchor_offset,
+		.edge_start = g_walk_edge_start,
+		.edge_end = g_edge_count,
+		.tnt_before = walk->tnt_before,
+		.tnt_used = walk->tnt_before - walk->tnt_after,
+		.tnt_after = walk->tnt_after,
+		.stop_addr = walk->stop_addr,
+		.flags = walk->flags,
+	};
+	fwrite(&rec, sizeof(rec), 1, (FILE*)opaque);
+}
+
+static FILE* walk_log_open(const char* path)
+{
+	static const char magic[8] = {'X', 'D', 'C', '-', 'W', 'A', 'L', 'K'};
+	uint32_t version = WALK_LOG_VERSION;
+	FILE* f = fopen(path, "wb");
+	if (!f)
+		return NULL;
+	setvbuf(f, g_walk_buf, _IOFBF, sizeof(g_walk_buf));
+	fwrite(magic, sizeof(magic), 1, f);
+	fwrite(&version, sizeof(version), 1, f);
+	return f;
+}
+
+int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const char* page_cache_file, const char* outfile, const char* walk_file)
 {
 	int ret_val = 0;
 	decoder_result_t ret;
@@ -52,16 +120,40 @@ int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const
 	}
 	setvbuf(out, g_out_buf, _IOFBF, sizeof(g_out_buf));
 
+	if (walk_file) {
+		g_walk_out = walk_log_open(walk_file);
+		if (!g_walk_out) {
+			fprintf(stderr, "Error: walk log: %s\n", strerror(errno));
+			if (out != stdout)
+				fclose(out);
+			return 1;
+		}
+	}
+
 	page_cache_t* page_cache =  page_cache_new(page_cache_file);
 	void* bitmap = malloc(0x10000);
 	libxdc_t* decoder = libxdc_init(filter, &page_cache_fetch, page_cache, bitmap, 0x10000);
 	libxdc_enable_tracing(decoder);
-	libxdc_register_edge_callback(decoder, &trace_log, out);
+	if (g_walk_out) {
+		libxdc_register_edge_callback(decoder, &trace_log_counted, out);
+		libxdc_register_walk_callbacks(decoder, &walk_begin, &walk_end, g_walk_out);
+	} else {
+		libxdc_register_edge_callback(decoder, &trace_log, out);
+	}
 	ret = libxdc_decode(decoder, trace, trace_size);
 	libxdc_disable_tracing(decoder);
 	fflush(out);
 	if (out != stdout)
 		fclose(out);
+	if (g_walk_out) {
+		int walk_err = ferror(g_walk_out);
+		walk_err |= fclose(g_walk_out);
+		g_walk_out = NULL;
+		if (walk_err) {
+			fprintf(stderr, "Error: walk log write failed\n");
+			ret_val = 1;
+		}
+	}
 
 	print_result_code(ret);
 	if (ret != decoder_success && ret != decoder_success_pt_overflow) {
@@ -86,11 +178,20 @@ int main(int argc, char** argv)
 	uint64_t final_hash;
 	const char* page_cache_file;
 	const char* outfile;
+	const char* walk_file = NULL;
 
 	int ret_val;
 
+	/* optional leading `-w <walk_log>`; the positional arguments are unchanged */
+	if (argc >= 3 && 0 == strcmp(argv[1], "-w")) {
+		walk_file = argv[2];
+		argv[2] = argv[0];
+		argv += 2;
+		argc -= 2;
+	}
+
 	if (argc < 6 || argc%2 == 1){
-		printf("Usage: %s <page_cache> <trace_data> <outfile>"
+		printf("Usage: %s [-w <walk_log>] <page_cache> <trace_data> <outfile>"
 				" <ip_start> <ip_end> [<ip_start> <ip_end>]\n", argv[0]);
 		printf("[ ] Aborting...\n");
 		return 1;
@@ -121,7 +222,7 @@ int main(int argc, char** argv)
 	}
 	//printf("[*] Trace size:  \t0x%lx\n", trace_size);
 
-	ret_val = trace_file(filter, trace, trace_size, page_cache_file, outfile);
+	ret_val = trace_file(filter, trace, trace_size, page_cache_file, outfile, walk_file);
 
 	free(trace);
 

@@ -348,6 +348,7 @@ disassembler_t* init_disassembler(uint64_t filter[4][2], void* (*page_cache_fetc
 	/* check me */
 	self->has_pending_indirect_branch = false;
  	self->pending_indirect_branch_src = 0;
+	self->walk_stop_addr = 0;
 
 	self->min_addr_0 = filter[0][0];
 	self->max_addr_0 = filter[0][1];
@@ -547,6 +548,8 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 				//printf("empty\n");
 				if(!trace_mode){
 					*new_tracelet = new_from_tracelet_cache_tmp(self->trace_cache->trace_cache, false);
+				} else {
+					self->walk_stop_addr = self->cfg.cofi_addr[nid];
 				}
 				return disas_tnt_empty;
 
@@ -594,6 +597,7 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 		if(unlikely(trace_mode)){
     		self->has_pending_indirect_branch = true;
     		self->pending_indirect_branch_src = self->cfg.cofi_addr[nid];
+			self->walk_stop_addr = self->cfg.cofi_addr[nid];
 			//disassembler_cfg_inspect(&self->cfg, nid);
 			//printf("RET with pending src: %lx\n", self->cfg.cofi_addr[nid]);
 		} else {
@@ -607,6 +611,7 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 		if(unlikely(trace_mode)){
     		self->has_pending_indirect_branch = true;
     		self->pending_indirect_branch_src = self->cfg.cofi_addr[nid];
+			self->walk_stop_addr = self->cfg.cofi_addr[nid];
 		}else {
 			*new_tracelet = new_from_tracelet_cache_tmp(self->trace_cache->trace_cache, false);
 		}
@@ -620,6 +625,8 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 		//printf("OUT OF BOUNDS\n");
 		if(likely(!trace_mode)){
 			*new_tracelet = new_from_tracelet_cache_tmp(self->trace_cache->trace_cache, false);
+		} else {
+			self->walk_stop_addr = self->cfg.cofi_addr[nid];
 		}
 		return disas_out_of_bounds;	
 
@@ -627,6 +634,8 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 		//printf("inf-loop 1\n");
 		if(likely(!trace_mode)){
 			*new_tracelet = new_from_tracelet_cache_tmp(self->trace_cache->trace_cache, false);
+		} else {
+			self->walk_stop_addr = self->cfg.cofi_addr[nid];
 		}
 		return disas_infinite_loop;
 	
