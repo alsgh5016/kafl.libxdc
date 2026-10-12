@@ -90,6 +90,7 @@ __attribute__ ((visibility ("default")))  void libxdc_register_ip_callback(libxd
  * before the walk emits its first edge, walk_end right after its last one, so a
  * caller that counts edge callbacks gets each walk's edge range. Passing a NULL
  * walk_end disables the log (the default); the decode itself is unchanged.
+ * Walks are reported in trace mode (libxdc_enable_tracing) only.
  */
 __attribute__ ((visibility ("default")))  void libxdc_register_walk_callbacks(libxdc_t* self, void (*walk_begin)(void*), void (*walk_end)(void*, const libxdc_walk_t*), void* opaque){
   assert(self);

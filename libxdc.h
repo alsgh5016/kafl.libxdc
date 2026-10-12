@@ -52,14 +52,19 @@ typedef enum disassembler_mode_s {
 #define LIBXDC_WALK_PAGE_FAULT   0x01 /* hit a missing page; the decoder resyncs at the next PGE/FUP */
 #define LIBXDC_WALK_INDIRECT     0x02 /* stopped at an indirect / far transfer (waits for a TIP) */
 #define LIBXDC_WALK_LIMITED      0x04 /* bounded by a FUP or TIP.PGD IP */
-#define LIBXDC_WALK_OOB_OR_LOOP  0x08 /* stopped at the FUP/PGD limit block, or at the loop limit */
-#define LIBXDC_WALK_LOOP         0x10 /* loop limit reached; implies OOB_OR_LOOP */
+#define LIBXDC_WALK_OOB_OR_LOOP  0x08 /* libxdc OUT_OF_BOUNDS or loop-limit stop; see LOOP and LEFT_RANGE */
+#define LIBXDC_WALK_LOOP         0x10 /* loop limit (MAX_LOOP_COUNT) reached; implies OOB_OR_LOOP */
+#define LIBXDC_WALK_LEFT_RANGE   0x20 /* left the filter range (branch target outside it, or block ran past its end); implies OOB_OR_LOOP */
+/* A walk that genuinely reached its FUP/PGD limit block is exactly:
+ * LIMITED && OOB_OR_LOOP && !LOOP && !LEFT_RANGE. */
 
 typedef struct libxdc_walk_s {
-	uint64_t anchor_offset; /* byte offset in the decoded buffer of the TIP/PGE/PGD packet that ran the walk, or of the FUP packet for a FUP-bound walk */
+	uint64_t anchor_offset; /* byte offset in the decoded buffer of the TIP/PGE/PGD packet that ran the walk, or of the FUP packet for a FUP-bound walk; UINT64_MAX when that FUP was in an earlier libxdc_decode() call */
 	uint64_t start;         /* walk entry IP */
-	uint64_t limit;         /* FUP/PGD IP passed to the disassembler as limit (0 = none) */
-	uint64_t stop_addr;     /* branch instruction the walk stopped at; faulting address on a page fault */
+	uint64_t limit;         /* FUP/PGD IP bounding the walk (0 when not LIMITED) */
+	uint64_t stop_addr;     /* branch instruction the walk stopped at; faulting address on a page fault;
+	                           LEFT_RANGE: 0 when a branch target was outside the range (the target is the dst
+	                           of the walk's last edge), else the first instruction past the range end */
 	uint32_t tnt_before;    /* TNT bits pending when the walk started */
 	uint32_t tnt_after;     /* TNT bits left when it stopped */
 	uint8_t flags;          /* LIBXDC_WALK_* */
@@ -87,6 +92,7 @@ void libxdc_register_ip_callback(libxdc_t* self,  void (*ip_callback)(void*, dis
  * before the walk emits its first edge, walk_end right after its last one, so a
  * caller that counts edge callbacks gets each walk's edge range. Passing a NULL
  * walk_end disables the log (the default); the decode itself is unchanged.
+ * Walks are reported in trace mode (libxdc_enable_tracing) only.
  */
 void libxdc_register_walk_callbacks(libxdc_t* self, void (*walk_begin)(void*), void (*walk_end)(void*, const libxdc_walk_t*), void* opaque);
 

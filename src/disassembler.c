@@ -349,6 +349,7 @@ disassembler_t* init_disassembler(uint64_t filter[4][2], void* (*page_cache_fetc
 	self->has_pending_indirect_branch = false;
  	self->pending_indirect_branch_src = 0;
 	self->walk_stop_addr = 0;
+	self->walk_left_range = false;
 
 	self->min_addr_0 = filter[0][0];
 	self->max_addr_0 = filter[0][1];
@@ -626,7 +627,14 @@ static inline void inform_disassembler_target_ip(disassembler_t* self, disassemb
 		if(likely(!trace_mode)){
 			*new_tracelet = new_from_tracelet_cache_tmp(self->trace_cache->trace_cache, false);
 		} else {
+			/* OUT_OF_BOUNDS is reached three ways: BRANCH_CHECK found the
+			 * FUP/PGD limit block with no TNT left (node type is the real
+			 * cofi type), or the node itself is OUT_OF_BOUNDS - NODE_OOB
+			 * (target outside the filter range, cofi_addr 0) or a block that
+			 * ran past the range end (disassemble_bb). Only the walk log
+			 * tells these apart. */
 			self->walk_stop_addr = self->cfg.cofi_addr[nid];
+			self->walk_left_range = (self->cfg.type[nid] == OUT_OF_BOUNDS);
 		}
 		return disas_out_of_bounds;	
 

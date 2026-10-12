@@ -364,12 +364,18 @@ static __attribute__((noinline)) void disasm_walk_logged(decoder_t* self, const 
 	disassembler_t* dis = self->disassembler_state;
 	libxdc_walk_t walk;
 
-	walk.anchor_offset = (uint64_t)(pkt - self->walk_map_base);
+	/* pkt is NULL for a FUP-bound walk whose FUP packet was parsed in an
+	 * earlier decode_buffer() call (fup_bind_pending survives across calls;
+	 * last_fup_pkt is reset per call because it would point into the old
+	 * buffer). ptdump decodes the whole file in one call, so it never happens
+	 * there. */
+	walk.anchor_offset = pkt ? (uint64_t)(pkt - self->walk_map_base) : UINT64_MAX;
 	walk.start = res->start;
-	walk.limit = res->end;
+	walk.limit = limited ? res->end : 0;
 	walk.tnt_before = (uint32_t)count_tnt(self->tnt_cache_state);
 	walk.flags = limited ? LIBXDC_WALK_LIMITED : 0;
 	dis->walk_stop_addr = 0;
+	dis->walk_left_range = false;
 	if(self->walk_begin_callback){
 		self->walk_begin_callback(self->walk_callback_opaque);
 	}
@@ -390,6 +396,9 @@ static __attribute__((noinline)) void disasm_walk_logged(decoder_t* self, const 
 			break;
 		case disas_out_of_bounds:
 			walk.flags |= LIBXDC_WALK_OOB_OR_LOOP;
+			if(dis->walk_left_range){
+				walk.flags |= LIBXDC_WALK_LEFT_RANGE;
+			}
 			break;
 		case disas_infinite_loop:
 			walk.flags |= LIBXDC_WALK_OOB_OR_LOOP | LIBXDC_WALK_LOOP;
@@ -408,7 +417,10 @@ static inline void disasm(decoder_t* self, const uint8_t* pkt, bool limited){
 	should_disasm_t* res = self->decoder_state_result;
 	if(res->valid && (!is_empty_tnt_cache(self->tnt_cache_state))){
 		LOGGER("disasm(%lx,%lx)\tTNT: %d\n", res->start, res->end, count_tnt(self->tnt_cache_state));
-		if(unlikely(self->walk_end_callback != NULL)){
+		/* Walks are logged in trace mode only: the stop address and the edge
+		 * callbacks exist only there (fuzzing mode replays cached tracelets
+		 * and emits no edges), so fuzzing mode never calls the walk hooks. */
+		if(unlikely(self->walk_end_callback != NULL) && self->disassembler_state->trace_mode){
 			disasm_walk_logged(self, pkt, limited);
 			return;
 		}
@@ -807,6 +819,7 @@ __attribute__((hot)) decoder_result_t decode_buffer(decoder_t* self, uint8_t* ma
 	bool pt_overflowed = false;
 	self->page_fault_found = false;
 	self->walk_map_base = map;
+	self->last_fup_pkt = NULL; /* a FUP pending from an earlier call has no offset in this buffer */
 
 	uint8_t *end = map + len;
 	uint8_t *p = map;

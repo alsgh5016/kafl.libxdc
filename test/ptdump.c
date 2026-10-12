@@ -36,14 +36,21 @@ void trace_log(void* ctx, disassembler_mode_t mode, uint64_t src, uint64_t dst)
 static char g_out_buf[1 << 22];
 
 /*
- * Walk log (`-w <path>`): header "XDC-WALK" + u32 version, then one 48-byte
- * little-endian record per libxdc walk, Python struct `<QQQIIIQB3x>`:
+ * Walk log (`-w <path>`): header "XDC-WALK" + u32 version, then one 68-byte
+ * little-endian record per libxdc walk, Python struct `<QQQIIIQQQB7x>`:
  * (anchor packet offset, first edge index, end edge index, tnt_before,
- *  tnt_used, tnt_after, stop address, flags). Edge indices count CSV rows.
- * Only when -w is given is the counting edge callback installed, so the
- * default path is exactly the old one.
+ *  tnt_used, tnt_after, stop address, walk entry IP, limit IP (0 when not
+ *  limited), flags). Edge indices count CSV rows. Only when -w is given is
+ * the counting edge callback installed, so the default path is exactly the
+ * old one.
+ *
+ * Exit codes: 0 decode ok, 1 decode failed / bad arguments (as before),
+ * 2 the walk log could not be opened or written (fopen/fwrite/fclose); the
+ * edge CSV may still be complete, but the run must not be used as a walk-log
+ * decode. 2 takes precedence over 1.
  */
-#define WALK_LOG_VERSION 1
+#define WALK_LOG_VERSION 2
+#define WALK_LOG_IO_ERROR 2
 
 typedef struct __attribute__((packed)) walk_record_s {
 	uint64_t anchor_offset;
@@ -53,10 +60,12 @@ typedef struct __attribute__((packed)) walk_record_s {
 	uint32_t tnt_used;
 	uint32_t tnt_after;
 	uint64_t stop_addr;
+	uint64_t entry;
+	uint64_t limit;
 	uint8_t flags;
-	uint8_t pad[3];
+	uint8_t pad[7];
 } walk_record_t;
-_Static_assert(sizeof(walk_record_t) == 48, "walk record is <QQQIIIQB3x>");
+_Static_assert(sizeof(walk_record_t) == 68, "walk record is <QQQIIIQQQB7x>");
 
 static char g_walk_buf[1 << 20];
 static FILE* g_walk_out = NULL;
@@ -85,6 +94,8 @@ static void walk_end(void* opaque, const libxdc_walk_t* walk)
 		.tnt_used = walk->tnt_before - walk->tnt_after,
 		.tnt_after = walk->tnt_after,
 		.stop_addr = walk->stop_addr,
+		.entry = walk->start,
+		.limit = walk->limit,
 		.flags = walk->flags,
 	};
 	fwrite(&rec, sizeof(rec), 1, (FILE*)opaque);
@@ -98,6 +109,7 @@ static FILE* walk_log_open(const char* path)
 	if (!f)
 		return NULL;
 	setvbuf(f, g_walk_buf, _IOFBF, sizeof(g_walk_buf));
+	/* a short header write sets the stream error flag, checked at close */
 	fwrite(magic, sizeof(magic), 1, f);
 	fwrite(&version, sizeof(version), 1, f);
 	return f;
@@ -106,6 +118,7 @@ static FILE* walk_log_open(const char* path)
 int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const char* page_cache_file, const char* outfile, const char* walk_file)
 {
 	int ret_val = 0;
+	bool walk_log_failed = false;
 	decoder_result_t ret;
 	FILE* out;
 
@@ -123,10 +136,10 @@ int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const
 	if (walk_file) {
 		g_walk_out = walk_log_open(walk_file);
 		if (!g_walk_out) {
-			fprintf(stderr, "Error: walk log: %s\n", strerror(errno));
+			fprintf(stderr, "Error: walk log open failed: %s\n", strerror(errno));
 			if (out != stdout)
 				fclose(out);
-			return 1;
+			return WALK_LOG_IO_ERROR;
 		}
 	}
 
@@ -149,10 +162,9 @@ int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const
 		int walk_err = ferror(g_walk_out);
 		walk_err |= fclose(g_walk_out);
 		g_walk_out = NULL;
-		if (walk_err) {
+		if (walk_err)
 			fprintf(stderr, "Error: walk log write failed\n");
-			ret_val = 1;
-		}
+		walk_log_failed = walk_err != 0;
 	}
 
 	print_result_code(ret);
@@ -160,6 +172,8 @@ int trace_file(uint64_t filter[4][2], uint8_t* trace, uint64_t trace_size, const
 		printf("[*] page fault addr:   \t0x%lx\n", libxdc_get_page_fault_addr(decoder));
 		ret_val = 1;
 	}
+	if (walk_log_failed)
+		ret_val = WALK_LOG_IO_ERROR;
 	// libxdc bitmap remains zero in trace mode
 	//printf("[*] bitmap hash:   \t0x%lx\n", libxdc_bitmap_get_hash(decoder));
 
